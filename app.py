@@ -9,12 +9,13 @@ from werkzeug.utils import secure_filename
 from textblob import TextBlob
 from gtts import gTTS
 from fpdf import FPDF
-import PyPDF2
+import pdfplumber
+import pdf2image
 import base64
 from PIL import Image
 import logging
 from datetime import datetime
-
+import tempfile
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -23,16 +24,13 @@ app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['ALLOWED_EXTENSIONS'] = {'png', 'jpg', 'jpeg', 'pdf'}
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max
 
-
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('Pen2Print')
 
-
-# Set Tesseract path (fix for the OCR error)
-pytesseract.pytesseract.tesseract_cmd = r'/usr/bin/tesseract'  # Default Linux path
-os.environ['TESSDATA_PREFIX'] = '/usr/share/tesseract-ocr/4.00/tessdata/'  # Typical Linux tessdata path
-
+# Set Tesseract path
+pytesseract.pytesseract.tesseract_cmd = r'/usr/bin/tesseract'
+os.environ['TESSDATA_PREFIX'] = '/usr/share/tesseract-ocr/4.00/tessdata/'
 
 # Database setup
 def init_db():
@@ -66,68 +64,50 @@ def init_db():
     finally:
         conn.close()
 
-
 init_db()
-
 
 # Validation functions
 def validate_email(email):
     return re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email)
-
 
 def validate_password(password):
     if len(password) < 8:
         return False, "Password must be at least 8 characters"
     return True, ""
 
-
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
 
-
-### IMPROVED IMAGE PROCESSING ###
-
-
+# Image processing functions
 def preprocess_image(image):
-    """Enhanced preprocessing for better OCR accuracy"""
     try:
-        # Convert to grayscale
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-       
-        # Contrast Limited Adaptive Histogram Equalization
+        if len(image.shape) == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = image
+            
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
         gray = clahe.apply(gray)
-       
-        # Adaptive thresholding with Otsu's method
         thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
-       
-        # Morphological operations to remove noise
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2,2))
         opening = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=1)
-       
-        # Sharpening
         kernel = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
         sharpened = cv2.filter2D(opening, -1, kernel)
-       
         return sharpened
     except Exception as e:
         logger.error(f"Image preprocessing failed: {str(e)}")
         return image
 
-
-### IMPROVED TEXT PROCESSING ###
-
-
 def correct_text(text):
-    """Enhanced text correction with better handling of common OCR errors"""
     try:
-        # First pass cleaning
+        if not text:
+            return ""
+            
         text = re.sub(r'[^\w\s\'",.?!\-:;()\n]', '', text)
         text = re.sub(r'\s+', ' ', text).strip()
-       
-        # Common OCR error replacements
+        
         replacements = {
-            r'\b([|\\/])\b': 'I',  # Single |,\,/ as I
+            r'\b([|\\/])\b': 'I',
             r'\b¢\b': 'c',
             r'\b©\b': 'c',
             r'\b`\b': "'",
@@ -143,15 +123,11 @@ def correct_text(text):
         for pattern, replacement in replacements.items():
             text = re.sub(pattern, replacement, text)
        
-        # Advanced spelling correction with context awareness
         blob = TextBlob(text)
         corrected = str(blob.correct())
+        corrected = re.sub(r'([.,!?])([^\s])', r'\1 \2', corrected)
+        corrected = re.sub(r'(\s)([.,!?])', r'\2', corrected)
        
-        # Post-correction formatting
-        corrected = re.sub(r'([.,!?])([^\s])', r'\1 \2', corrected)  # Add space after punctuation
-        corrected = re.sub(r'(\s)([.,!?])', r'\2', corrected)  # Remove space before punctuation
-       
-        # Capitalize sentences
         sentences = re.split(r'([.!?] )', corrected)
         corrected = ''.join([s.capitalize() if i % 2 == 0 else s for i, s in enumerate(sentences)])
        
@@ -160,81 +136,100 @@ def correct_text(text):
         logger.error(f"Text correction failed: {str(e)}")
         return text
 
+# Enhanced PDF processing with multiple fallbacks
+def process_pdf_file(pdf_path):
+    start_time = datetime.now()
+    full_text = ""
+    
+    try:
+        # Method 1: Try pdfplumber for text-based PDFs
+        try:
+            with pdfplumber.open(pdf_path) as pdf:
+                for page in pdf.pages:
+                    page_text = page.extract_text(x_tolerance=1, y_tolerance=1)
+                    if page_text:
+                        full_text += page_text + "\n"
+        except Exception as e:
+            logger.warning(f"pdfplumber failed: {str(e)}")
+        
+        # Method 2: If no text, try OCR on rendered pages
+        if not full_text.strip():
+            try:
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    images = pdf2image.convert_from_path(
+                        pdf_path,
+                        output_folder=temp_dir,
+                        fmt='png',
+                        thread_count=4
+                    )
+                    for i, image in enumerate(images):
+                        img = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+                        processed_img = preprocess_image(img)
+                        text = pytesseract.image_to_string(
+                            processed_img,
+                            config='--psm 6 --oem 3 -c preserve_interword_spaces=1'
+                        )
+                        full_text += text + "\n"
+            except Exception as e:
+                logger.error(f"PDF OCR failed: {str(e)}")
+                raise ValueError("Could not extract text from PDF")
+        
+        if not full_text.strip():
+            raise ValueError("No text could be extracted from PDF")
+            
+        full_text = re.sub(r'\s+', ' ', full_text).strip()
+        full_text = re.sub(r'([.,!?])([^\s])', r'\1 \2', full_text)
+        corrected_text = correct_text(full_text)
+        processing_time = (datetime.now() - start_time).total_seconds()
+        
+        return full_text, corrected_text, processing_time
+    except Exception as e:
+        logger.error(f"PDF processing failed: {str(e)}")
+        raise
 
 def process_image_file(image_path):
-    """Improved image processing with better OCR configuration"""
     start_time = datetime.now()
     try:
         img = cv2.imread(image_path)
         if img is None:
             raise ValueError("Could not read image file")
        
-        # Resize if too large but maintain aspect ratio
         height, width = img.shape[:2]
-        max_dim = 2500  # Increased from 2000 for better quality
+        max_dim = 2500
         if height > max_dim or width > max_dim:
             scale = max_dim / max(height, width)
             img = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
        
-        # Enhanced preprocessing
         processed_img = preprocess_image(img)
-       
-        # Perform OCR with optimized configuration
-        custom_config = r'--oem 3 --psm 6 -l eng'  # Simplified language config
+        custom_config = r'--oem 3 --psm 6 -l eng'
         text = pytesseract.image_to_string(processed_img, config=custom_config)
-       
-        # Improved cleaning
         text = re.sub(r'[^\w\s\'",.?!\-:;()\n]', '', text)
         text = re.sub(r'\s+', ' ', text).strip()
-       
-        # Enhanced text correction
+        
+        if not text.strip():
+            raise ValueError("No text could be extracted from image")
+            
         corrected_text = correct_text(text)
-       
         processing_time = (datetime.now() - start_time).total_seconds()
         return text, corrected_text, processing_time
     except Exception as e:
         logger.error(f"Image processing failed: {str(e)}")
         raise
 
-
-def process_pdf_file(pdf_path):
-    """Improved PDF processing"""
-    start_time = datetime.now()
-    full_text = ""
-    try:
-        with open(pdf_path, 'rb') as file:
-            reader = PyPDF2.PdfReader(file)
-           
-            for page in reader.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    full_text += page_text + "\n"
-       
-        # Advanced cleaning
-        full_text = re.sub(r'\s+', ' ', full_text).strip()
-        full_text = re.sub(r'([.,!?])([^\s])', r'\1 \2', full_text)
-       
-        # Enhanced text correction
-        corrected_text = correct_text(full_text)
-        processing_time = (datetime.now() - start_time).total_seconds()
-       
-        return full_text, corrected_text, processing_time
-    except Exception as e:
-        logger.error(f"PDF processing failed: {str(e)}")
-        raise
-
-
-# File generation functions
 def text_to_speech(text, output_path):
     try:
+        if not text.strip():
+            raise ValueError("Empty text for TTS")
         tts = gTTS(text=text, lang='en', slow=False)
         tts.save(output_path)
     except Exception as e:
         logger.error(f"Text-to-speech failed: {str(e)}")
-
+        raise
 
 def text_to_pdf(text, output_path):
     try:
+        if not text.strip():
+            raise ValueError("Empty text for PDF")
         pdf = FPDF()
         pdf.add_page()
         pdf.set_font("Arial", size=12)
@@ -242,20 +237,17 @@ def text_to_pdf(text, output_path):
         pdf.output(output_path)
     except Exception as e:
         logger.error(f"PDF generation failed: {str(e)}")
+        raise
 
-
-# Database helper function
 def get_db_connection():
     conn = sqlite3.connect('pen2print.db')
     conn.row_factory = sqlite3.Row
     return conn
 
-
 # Routes
 @app.route('/')
 def home():
     return render_template('home.html')
-
 
 @app.route('/register', methods=['GET', 'POST'])
 def register():
@@ -265,27 +257,22 @@ def register():
         password = request.form['password']
         confirm_password = request.form['confirm_password']
 
-
         if len(username) < 4:
             flash('Username must be at least 4 characters', 'danger')
             return redirect(url_for('register'))
 
-
         if not validate_email(email):
             flash('Invalid email format', 'danger')
             return redirect(url_for('register'))
-
 
         valid_pass, msg = validate_password(password)
         if not valid_pass:
             flash(msg, 'danger')
             return redirect(url_for('register'))
 
-
         if password != confirm_password:
             flash('Passwords do not match', 'danger')
             return redirect(url_for('register'))
-
 
         conn = None
         try:
@@ -304,9 +291,7 @@ def register():
             if conn:
                 conn.close()
 
-
     return render_template('register.html')
-
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
@@ -336,7 +321,6 @@ def login():
    
     return render_template('login.html')
 
-
 @app.route('/dashboard')
 def dashboard():
     if 'user_id' not in session:
@@ -357,7 +341,6 @@ def dashboard():
         if conn:
             conn.close()
 
-
 @app.route('/upload', methods=['GET', 'POST'])
 def upload():
     if 'user_id' not in session:
@@ -376,6 +359,8 @@ def upload():
        
         if file and allowed_file(file.filename):
             filename = secure_filename(file.filename)
+            if not os.path.exists(app.config['UPLOAD_FOLDER']):
+                os.makedirs(app.config['UPLOAD_FOLDER'])
             filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
             file.save(filepath)
            
@@ -407,7 +392,9 @@ def upload():
                 return redirect(url_for('result', doc_id=doc_id))
             except Exception as e:
                 logger.error(f"Upload processing failed: {str(e)}")
-                flash('Error processing file', 'danger')
+                flash(f'Error processing file: {str(e)}', 'danger')
+                if os.path.exists(filepath):
+                    os.remove(filepath)
                 return redirect(url_for('upload'))
             finally:
                 if conn:
@@ -416,7 +403,6 @@ def upload():
             flash('Allowed file types: PNG, JPG, JPEG, PDF', 'danger')
    
     return render_template('upload.html')
-
 
 @app.route('/result/<int:doc_id>', methods=['GET', 'POST'])
 def result(doc_id):
@@ -440,24 +426,20 @@ def result(doc_id):
             timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
            
             try:
-                # Generate new audio with timestamp to ensure uniqueness
                 audio_filename = f"audio_{session['user_id']}_{base_name}_{timestamp}.mp3"
                 audio_path = os.path.join(app.config['UPLOAD_FOLDER'], audio_filename)
                 text_to_speech(corrected_text, audio_path)
                
-                # Generate new PDF with timestamp
                 pdf_filename = f"output_{session['user_id']}_{base_name}_{timestamp}.pdf"
                 pdf_path = os.path.join(app.config['UPLOAD_FOLDER'], pdf_filename)
                 text_to_pdf(corrected_text, pdf_path)
                
-                # Update database with new paths and text
                 conn.execute('''UPDATE documents
                               SET corrected_text = ?, audio_path = ?, pdf_path = ?
                               WHERE id = ?''',
                            (corrected_text, audio_path, pdf_path, doc_id))
                 conn.commit()
                
-                # Delete old files if they exist
                 try:
                     if document['audio_path'] and os.path.exists(document['audio_path']):
                         os.remove(document['audio_path'])
@@ -466,7 +448,6 @@ def result(doc_id):
                 except Exception as e:
                     logger.error(f"Error deleting old files: {str(e)}")
                
-                # Refresh the document data after update
                 document = conn.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchone()
                
                 flash('Document updated successfully!', 'success')
@@ -491,7 +472,6 @@ def result(doc_id):
         if conn:
             conn.close()
 
-
 @app.route('/regenerate_audio/<int:doc_id>', methods=['POST'])
 def regenerate_audio(doc_id):
     if 'user_id' not in session:
@@ -510,21 +490,17 @@ def regenerate_audio(doc_id):
         if not document:
             return jsonify({'success': False, 'error': 'Document not found'}), 404
         
-        # Generate new audio filename with timestamp
         base_name = os.path.splitext(document['filename'])[0]
         timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
         audio_filename = f"audio_{session['user_id']}_{base_name}_{timestamp}.mp3"
         audio_path = os.path.join(app.config['UPLOAD_FOLDER'], audio_filename)
         
-        # Generate new audio
         text_to_speech(data['text'], audio_path)
         
-        # Update database with new audio path
         conn.execute("UPDATE documents SET audio_path = ? WHERE id = ?",
                    (audio_path, doc_id))
         conn.commit()
         
-        # Delete old audio file if it exists
         try:
             if document['audio_path'] and os.path.exists(document['audio_path']):
                 os.remove(document['audio_path'])
@@ -541,7 +517,6 @@ def regenerate_audio(doc_id):
     finally:
         if conn:
             conn.close()
-
 
 @app.route('/download_pdf/<int:doc_id>')
 def download_pdf(doc_id):
@@ -570,7 +545,6 @@ def download_pdf(doc_id):
         if conn:
             conn.close()
 
-
 @app.route('/download_audio/<int:doc_id>')
 def download_audio(doc_id):
     if 'user_id' not in session:
@@ -598,7 +572,6 @@ def download_audio(doc_id):
         if conn:
             conn.close()
 
-
 @app.route('/delete/<int:doc_id>')
 def delete(doc_id):
     if 'user_id' not in session:
@@ -624,7 +597,7 @@ def delete(doc_id):
                 if os.path.exists(original_file):
                     os.remove(original_file)
             except Exception as e:
-                logger.error(f"File deletion error: {str(e)}")
+                logger.error(f"Error deleting old files: {str(e)}")
        
         flash('Document deleted successfully', 'success')
         return redirect(url_for('dashboard'))
@@ -636,13 +609,11 @@ def delete(doc_id):
         if conn:
             conn.close()
 
-
 @app.route('/logout')
 def logout():
     session.clear()
     flash('You have been logged out', 'info')
     return redirect(url_for('home'))
-
 
 if __name__ == '__main__':
     os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
