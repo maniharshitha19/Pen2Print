@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}Home{% endblock %}
+
+{% block content %}
+<section class="hero">
+    <div class="hero-content">
+        <h2>Transform Your Handwriting to Digital Text</h2>
+        <p>Pen2Print converts handwritten notes into editable digital text with high accuracy.</p>
+        <div class="cta-buttons">
+            <a href="{{ url_for('register') }}" class="btn btn-primary">Get Started</a>
+            <a href="{{ url_for('login') }}" class="btn btn-secondary">Login</a>
+        </div>
+    </div>
+    <div class="hero-image">
+        <img src="{{ url_for('static', filename='images/hero-image.jpg') }}" alt="Handwriting to Text Conversion">
+    </div>
+</section>
+
+<section class="features">
+    <h3>Key Features</h3>
+    <div class="feature-grid">
+        <div class="feature-card">
+            <i class="fas fa-file-image"></i>
+            <h4>Image & PDF Support</h4>
+            <p>Upload images or PDFs containing handwritten text for conversion.</p>
+        </div>
+        <div class="feature-card">
+            <i class="fas fa-spell-check"></i>
+            <h4>Spell Check & Correction</h4>
+            <p>Automatically correct OCR errors with advanced spell checking.</p>
+        </div>
+        <div class="feature-card">
+            <i class="fas fa-volume-up"></i>
+            <h4>Text-to-Speech</h4>
+            <p>Listen to your converted text with adjustable playback speed.</p>
+        </div>
+        <div class="feature-card">
+            <i class="fas fa-file-pdf"></i>
+            <h4>PDF Export</h4>
+            <p>Save your converted text as a downloadable PDF document.</p>
+        </div>
+    </div>
+</section>
+
+<section class="how-it-works">
+    <h3>How It Works</h3>
+    <div class="steps">
+        <div class="step">
+            <div class="step-number">1</div>
+            <p>Upload your handwritten image or PDF</p>
+        </div>
+        <div class="step">
+            <div class="step-number">2</div>
+            <p>Our system processes and extracts the text</p>
+        </div>
+        <div class="step">
+            <div class="step-number">3</div>
+            <p>Edit and correct the extracted text</p>
+        </div>
+        <div class="step">
+            <div class="step-number">4</div>
+            <p>Download as PDF or listen as audio</p>
+        </div>
+    </div>
+</section>
+{% endblock %}
+
