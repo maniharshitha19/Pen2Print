@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+{% block title %}Document Result{% endblock %}
+
+{% block content %}
+<section class="document-result">
+    <h2>Document: {{ document[2] }}</h2>
+    
+    <div class="result-grid">
+        <div class="preview-section">
+            <h3>Document Preview</h3>
+            {% if preview_data %}
+                <img src="data:image/png;base64,{{ preview_data }}" alt="Uploaded Document" class="document-preview">
+            {% else %}
+                <div class="pdf-preview">
+                    <i class="fas fa-file-pdf"></i>
+                    <p>PDF Document</p>
+                </div>
+            {% endif %}
+        </div>
+        
+        <div class="text-section">
+            <h3>Extracted Text</h3>
+            <form method="POST">
+                <textarea name="corrected_text" id="corrected_text" rows="15">{{ document[4] }}</textarea>
+                <button type="submit" class="btn btn-primary">Save Changes</button>
+            </form>
+        </div>
+    </div>
+    
+    <div class="audio-section">
+        <h3>Listen to Text</h3>
+        <audio id="textAudio" controls>
+            <source src="{{ url_for('download_audio', doc_id=document[0]) }}" type="audio/mpeg">
+            Your browser does not support the audio element.
+        </audio>
+        <div class="audio-controls">
+            <label for="playbackRate">Speed:</label>
+            <select id="playbackRate">
+                <option value="0.5">0.5x</option>
+                <option value="0.75">0.75x</option>
+                <option value="1" selected>1x</option>
+                <option value="1.25">1.25x</option>
+                <option value="1.5">1.5x</option>
+                <option value="2">2x</option>
+            </select>
+            <button id="regenerateAudio" class="btn btn-secondary">
+                <i class="fas fa-sync-alt"></i> Regenerate Audio
+            </button>
+        </div>
+    </div>
+    
+    <div class="action-buttons">
+        <a href="{{ url_for('download_pdf', doc_id=document[0]) }}" class="btn btn-download">
+            <i class="fas fa-file-pdf"></i> Download PDF
+        </a>
+        <a href="{{ url_for('download_audio', doc_id=document[0]) }}" class="btn btn-download">
+            <i class="fas fa-download"></i> Download Audio
+        </a>
+        <a href="{{ url_for('dashboard') }}" class="btn btn-secondary">
+            <i class="fas fa-arrow-left"></i> Back to Dashboard
+        </a>
+    </div>
+</section>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const regenerateBtn = document.getElementById('regenerateAudio');
+    if (regenerateBtn) {
+        regenerateBtn.addEventListener('click', function(e) {
+            e.preventDefault();
+            
+            const text = document.getElementById('corrected_text').value;
+            const docId = '{{ document[0] }}';
+            
+            fetch('/regenerate_audio/' + docId, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    text: text
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    const audioPlayer = document.getElementById('textAudio');
+                    // Force refresh of audio source
+                    audioPlayer.src = data.audio_url + '?t=' + new Date().getTime();
+                    audioPlayer.load();
+                    audioPlayer.play();
+                    
+                    // Show success message
+                    alert('Audio regenerated successfully!');
+                } else {
+                    alert('Error regenerating audio: ' + data.error);
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('Error regenerating audio');
+            });
+        });
+    }
+});
+</script>
+{% endblock %}
+
